@@ -3,8 +3,11 @@ package com.vietnamese.offlinestudy
 
 import android.app.Activity
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.content.Intent
 import android.net.Uri
+import android.media.MediaPlayer
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -29,17 +32,62 @@ class MainActivity : Activity() {
     private val appScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    private val handler = Handler(Looper.getMainLooper())
+
     private lateinit var status: TextView
     private lateinit var resultText: TextView
     private lateinit var progress: ProgressBar
     private lateinit var selectButton: Button
     private lateinit var saveButton: Button
+    private lateinit var playButton: Button
+    private lateinit var segmentContainer: LinearLayout
 
     private var isWorking = false
+    private var mediaPlayer: MediaPlayer? = null
+    private var currentAudioFile: File? = null
+    private var segmentStopAtMs: Long? = null
+    private var activeSegmentIndex = -1
+
+    private data class TranscriptSegment(
+        val startMs: Long,
+        val endMs: Long,
+        val view: TextView
+    )
+
+    private val segmentItems =
+        mutableListOf<TranscriptSegment>()
 
     private val modelName = "ggml-base.bin"
     private val modelUrl =
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+
+    private val playbackUpdater = object : Runnable {
+        override fun run() {
+            val player = mediaPlayer ?: return
+
+            if (!player.isPlaying) return
+
+            val position = player.currentPosition.toLong()
+
+            val index = segmentItems.indexOfFirst {
+                position >= it.startMs &&
+                position < it.endMs
+            }
+
+            setActiveSegment(index)
+
+            val stopAt = segmentStopAtMs
+
+            if (stopAt != null && position >= stopAt) {
+                player.pause()
+                segmentStopAtMs = null
+                playButton.text = "▶ 音声を再生"
+                return
+            }
+
+            handler.postDelayed(this, 100)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,6 +131,14 @@ class MainActivity : Activity() {
             }
         }
 
+        playButton = Button(this).apply {
+            text = "▶ 音声を再生"
+            isEnabled = false
+            setOnClickListener {
+                togglePlayback()
+            }
+        }
+
         saveButton = Button(this).apply {
             text = "文字起こし結果をTXT保存"
             isEnabled = false
@@ -105,26 +161,28 @@ class MainActivity : Activity() {
         }
 
         val resultTitle = TextView(this).apply {
-            text = "文字起こし結果"
-            textSize = 18f
-            setPadding(0, 24, 0, 8)
+            text = "文字起こし結果（文章をタップすると再生）"
+            textSize = 17f
+            setPadding(0, 20, 0, 8)
         }
 
         resultText = TextView(this).apply {
-            text = "ここにベトナム語の文章が表示されます。"
-            textSize = 17f
-            setTextIsSelectable(true)
-            setPadding(12, 12, 12, 12)
+            visibility = View.GONE
+        }
+
+        segmentContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
         }
 
         val resultScroll = ScrollView(this).apply {
-            addView(resultText)
+            addView(segmentContainer)
         }
 
         layout.addView(title)
         layout.addView(status)
         layout.addView(progress)
         layout.addView(selectButton)
+        layout.addView(playButton)
         layout.addView(saveButton)
         layout.addView(resultTitle)
 
@@ -184,23 +242,26 @@ class MainActivity : Activity() {
     private fun transcribe(uri: Uri) {
 
         isWorking = true
-        selectButton.isEnabled = false
+        releasePlayer()
+
+        segmentItems.clear()
+        segmentContainer.removeAllViews()
+
+        resultText.text = ""
         saveButton.isEnabled = false
+        playButton.isEnabled = false
+        selectButton.isEnabled = false
+
         progress.visibility = View.VISIBLE
         progress.isIndeterminate = true
 
         appScope.launch {
 
-            var audioFile: File? = null
-
             try {
                 status.text = "音声ファイルを準備しています..."
 
-                audioFile = withContext(Dispatchers.IO) {
-                    val file = File(
-                        cacheDir,
-                        "audio_${System.currentTimeMillis()}.mp3"
-                    )
+                val audioFile = withContext(Dispatchers.IO) {
+                    val file = File(filesDir, "last_audio.mp3")
 
                     val input = contentResolver.openInputStream(uri)
                         ?: error("音声ファイルを開けません。")
@@ -213,6 +274,8 @@ class MainActivity : Activity() {
 
                     file
                 }
+
+                currentAudioFile = audioFile
 
                 val modelFile = File(
                     filesDir,
@@ -251,16 +314,62 @@ class MainActivity : Activity() {
                         WhisperConfig(language = "vi")
                     )
 
-                    resultText.text = result.text.trim().ifEmpty {
-                        "音声を認識できませんでした。"
+                    resultText.text = result.text.trim()
+
+                    result.segments.forEach { s ->
+                        val text = s.text.trim()
+
+                        if (text.isNotEmpty()) {
+                            val start = s.startMs.toLong()
+                            val end = s.endMs.toLong()
+                                .coerceAtLeast(start + 1)
+
+                            val segmentView = TextView(this@MainActivity).apply {
+                                this.text = text
+                                textSize = 18f
+                                setPadding(12, 14, 12, 14)
+                                setBackgroundColor(0x00000000)
+                                isClickable = true
+                                setOnClickListener {
+                                    playSegment(start, end)
+                                }
+                            }
+
+                            segmentItems.add(
+                                TranscriptSegment(
+                                    start,
+                                    end,
+                                    segmentView
+                                )
+                            )
+
+                            segmentContainer.addView(segmentView)
+                        }
+                    }
+
+                    if (segmentItems.isEmpty() &&
+                        resultText.text.isNotBlank()
+                    ) {
+                        val fallback = TextView(this@MainActivity).apply {
+                            text = resultText.text
+                            textSize = 18f
+                            setPadding(12, 14, 12, 14)
+                            setOnClickListener {
+                                playSegment(0, Long.MAX_VALUE)
+                            }
+                        }
+                        segmentContainer.addView(fallback)
                     }
 
                     saveButton.isEnabled =
-                        resultText.text.toString().isNotBlank() &&
-                        resultText.text.toString() !=
-                        "音声を認識できませんでした。"
+                        resultText.text.isNotBlank()
 
-                    status.text = "文字起こしが完了しました。"
+                    playButton.isEnabled =
+                        audioFile.exists()
+
+                    status.text =
+                        "文字起こしが完了しました。\n" +
+                        "文章をタップすると、その部分を再生します。"
 
                 } finally {
                     Whisper.releaseModel(model)
@@ -273,12 +382,101 @@ class MainActivity : Activity() {
 
             } finally {
 
-                audioFile?.delete()
                 isWorking = false
                 selectButton.isEnabled = true
                 progress.visibility = View.GONE
             }
         }
+    }
+
+    private fun togglePlayback() {
+        try {
+            val player = getPlayer() ?: return
+
+            if (player.isPlaying) {
+                player.pause()
+                handler.removeCallbacks(playbackUpdater)
+                playButton.text = "▶ 音声を再生"
+            } else {
+                segmentStopAtMs = null
+                player.start()
+                playButton.text = "⏸ 一時停止"
+                handler.removeCallbacks(playbackUpdater)
+                handler.post(playbackUpdater)
+            }
+
+        } catch (e: Exception) {
+            status.text = "再生エラー：${e.message}"
+        }
+    }
+
+    private fun playSegment(startMs: Long, endMs: Long) {
+        try {
+            val player = getPlayer() ?: return
+
+            segmentStopAtMs =
+                if (endMs == Long.MAX_VALUE) null else endMs
+
+            player.seekTo(startMs.toInt().coerceAtLeast(0))
+            player.start()
+
+            playButton.text = "⏸ 一時停止"
+
+            handler.removeCallbacks(playbackUpdater)
+            handler.post(playbackUpdater)
+
+        } catch (e: Exception) {
+            status.text = "再生エラー：${e.message}"
+        }
+    }
+
+    private fun getPlayer(): MediaPlayer? {
+        if (mediaPlayer == null) {
+            val file = currentAudioFile ?: return null
+
+            if (!file.exists()) {
+                status.text = "音声ファイルが見つかりません。"
+                return null
+            }
+
+            val player = MediaPlayer()
+
+            player.setDataSource(file.absolutePath)
+            player.prepare()
+
+            player.setOnCompletionListener {
+                handler.removeCallbacks(playbackUpdater)
+                segmentStopAtMs = null
+                playButton.text = "▶ 音声を再生"
+                setActiveSegment(-1)
+                it.seekTo(0)
+            }
+
+            mediaPlayer = player
+        }
+
+        return mediaPlayer
+    }
+
+    private fun setActiveSegment(index: Int) {
+        if (activeSegmentIndex == index) return
+
+        activeSegmentIndex = index
+
+        segmentItems.forEachIndexed { i, segment ->
+            segment.view.setBackgroundColor(
+                if (i == index) 0xFFE3F2FD.toInt()
+                else 0x00000000
+            )
+        }
+    }
+
+    private fun releasePlayer() {
+        handler.removeCallbacks(playbackUpdater)
+        mediaPlayer?.release()
+        mediaPlayer = null
+        segmentStopAtMs = null
+        activeSegmentIndex = -1
     }
 
     private fun downloadModel(destination: File) {
@@ -352,6 +550,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        releasePlayer()
         super.onDestroy()
         appScope.cancel()
     }
