@@ -12,8 +12,8 @@ android {
         applicationId = "com.vietnamese.offlinestudy"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     compileOptions {
@@ -24,4 +24,9 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    implementation("dev.ffmpegkit-maintained:whisper-android:1.0.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
 }
