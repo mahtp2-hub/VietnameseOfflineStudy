@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private lateinit var resultText: TextView
     private lateinit var progress: ProgressBar
     private lateinit var selectButton: Button
+    private lateinit var saveButton: Button
 
     private var isWorking = false
 
@@ -82,6 +83,27 @@ class MainActivity : Activity() {
             }
         }
 
+        saveButton = Button(this).apply {
+            text = "文字起こし結果をTXT保存"
+            isEnabled = false
+            setOnClickListener {
+                val text = resultText.text.toString()
+
+                if (text.isNotBlank()) {
+                    val intent =
+                        Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "text/plain"
+                            putExtra(
+                                Intent.EXTRA_TITLE,
+                                "Vietnamese_transcription.txt"
+                            )
+                        }
+                    startActivityForResult(intent, 101)
+                }
+            }
+        }
+
         val resultTitle = TextView(this).apply {
             text = "文字起こし結果"
             textSize = 18f
@@ -103,6 +125,7 @@ class MainActivity : Activity() {
         layout.addView(status)
         layout.addView(progress)
         layout.addView(selectButton)
+        layout.addView(saveButton)
         layout.addView(resultTitle)
 
         layout.addView(
@@ -133,6 +156,28 @@ class MainActivity : Activity() {
             } else {
                 transcribe(uri)
             }
+
+        } else if (requestCode == 101 && resultCode == RESULT_OK) {
+            val uri = data?.data
+
+            if (uri == null) {
+                status.text = "保存先を選択できませんでした。"
+            } else {
+                try {
+                    contentResolver.openOutputStream(uri)?.use { output ->
+                        output.write(
+                            resultText.text.toString()
+                                .toByteArray(Charsets.UTF_8)
+                        )
+                    } ?: error("保存先を開けません。")
+
+                    status.text = "TXTファイルを保存しました。"
+
+                } catch (e: Exception) {
+                    status.text =
+                        "保存エラー：${e.message ?: e.javaClass.simpleName}"
+                }
+            }
         }
     }
 
@@ -140,6 +185,7 @@ class MainActivity : Activity() {
 
         isWorking = true
         selectButton.isEnabled = false
+        saveButton.isEnabled = false
         progress.visibility = View.VISIBLE
         progress.isIndeterminate = true
 
@@ -208,6 +254,11 @@ class MainActivity : Activity() {
                     resultText.text = result.text.trim().ifEmpty {
                         "音声を認識できませんでした。"
                     }
+
+                    saveButton.isEnabled =
+                        resultText.text.toString().isNotBlank() &&
+                        resultText.text.toString() !=
+                        "音声を認識できませんでした。"
 
                     status.text = "文字起こしが完了しました。"
 
