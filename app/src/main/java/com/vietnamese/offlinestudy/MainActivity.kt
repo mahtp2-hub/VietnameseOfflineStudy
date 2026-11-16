@@ -63,6 +63,24 @@ class MainActivity : Activity() {
     private val modelUrl =
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
 
+    private val transcriptionProgressUpdater =
+        object : Runnable {
+            override fun run() {
+                if (!isWorking) return
+
+                if (progress.progress < 90) {
+                    progress.progress =
+                        (progress.progress + 1).coerceAtMost(90)
+                }
+
+                status.text =
+                    "ベトナム語を文字起こししています...\n" +
+                    "進捗目安：${progress.progress}%（実際の認識率ではありません）"
+
+                handler.postDelayed(this, 2000)
+            }
+        }
+
     private val playbackUpdater = object : Runnable {
         override fun run() {
             val player = mediaPlayer ?: return
@@ -248,6 +266,8 @@ class MainActivity : Activity() {
         isWorking = true
         releasePlayer()
 
+        handler.removeCallbacks(transcriptionProgressUpdater)
+
         segmentItems.clear()
         segmentContainer.removeAllViews()
 
@@ -258,6 +278,7 @@ class MainActivity : Activity() {
 
         progress.visibility = View.VISIBLE
         progress.isIndeterminate = true
+        progress.progress = 0
 
         appScope.launch {
 
@@ -300,98 +321,112 @@ class MainActivity : Activity() {
                     }
                 }
 
-                status.text = "音声認識モデルを読み込んでいます..."
+                progress.isIndeterminate = false
+                progress.progress = 0
 
-                val model = Whisper.loadModel(
-                    this@MainActivity,
-                    modelFile.absolutePath
+                status.text =
+                    "ベトナム語を文字起こししています...\n" +
+                    "進捗目安：0%（実際の認識率ではありません）"
+
+                handler.removeCallbacks(transcriptionProgressUpdater)
+                handler.postDelayed(
+                    transcriptionProgressUpdater,
+                    2000
                 )
 
-                try {
-                    status.text =
-                        "ベトナム語を文字起こししています...\n" +
-                        "音声の長さによって数分かかります。"
+                val result = withContext(Dispatchers.Default) {
 
-                    val result = Whisper.transcribe(
-                        model,
-                        audioFile.absolutePath,
-                        WhisperConfig(language = "vi")
+                    val model = Whisper.loadModel(
+                        this@MainActivity,
+                        modelFile.absolutePath
                     )
 
-                    resultText.text = result.text.trim()
-
-                    result.segments.forEach { s ->
-                        val text = s.text.trim()
-
-                        if (text.isNotEmpty()) {
-                            val start = s.startMs.toLong()
-                            val end = s.endMs.toLong()
-                                .coerceAtLeast(start + 1)
-
-                            val segmentView = TextView(this@MainActivity).apply {
-                                this.text = text
-                                textSize = 18f
-                                setPadding(12, 14, 12, 14)
-                                setBackgroundColor(0x00000000)
-                                isClickable = true
-
-                                setOnClickListener {
-                                    playSegment(start, end)
-                                }
-
-                                setOnLongClickListener {
-                                    translateSegment(text)
-                                    true
-                                }
-                            }
-
-                            segmentItems.add(
-                                TranscriptSegment(
-                                    start,
-                                    end,
-                                    segmentView
-                                )
-                            )
-
-                            segmentContainer.addView(segmentView)
-                        }
+                    try {
+                        Whisper.transcribe(
+                            model,
+                            audioFile.absolutePath,
+                            WhisperConfig(language = "vi")
+                        )
+                    } finally {
+                        Whisper.releaseModel(model)
                     }
+                }
 
-                    if (segmentItems.isEmpty() &&
-                        resultText.text.isNotBlank()
-                    ) {
-                        val fallback = TextView(this@MainActivity).apply {
-                            text = resultText.text
+                handler.removeCallbacks(transcriptionProgressUpdater)
+                progress.progress = 100
+
+                status.text = "文字起こし結果を整理しています..."
+
+                resultText.text = result.text.trim()
+
+                result.segments.forEach { s ->
+                    val text = s.text.trim()
+
+                    if (text.isNotEmpty()) {
+                        val start = s.startMs.toLong()
+                        val end = s.endMs.toLong()
+                            .coerceAtLeast(start + 1)
+
+                        val segmentView = TextView(this@MainActivity).apply {
+                            this.text = text
                             textSize = 18f
                             setPadding(12, 14, 12, 14)
+                            setBackgroundColor(0x00000000)
+                            isClickable = true
 
                             setOnClickListener {
-                                playSegment(0, Long.MAX_VALUE)
+                                playSegment(start, end)
                             }
 
                             setOnLongClickListener {
-                                translateSegment(
-                                    resultText.text.toString()
-                                )
+                                translateSegment(text)
                                 true
                             }
                         }
-                        segmentContainer.addView(fallback)
+
+                        segmentItems.add(
+                            TranscriptSegment(
+                                start,
+                                end,
+                                segmentView
+                            )
+                        )
+
+                        segmentContainer.addView(segmentView)
                     }
-
-                    saveButton.isEnabled =
-                        resultText.text.isNotBlank()
-
-                    playButton.isEnabled =
-                        audioFile.exists()
-
-                    status.text =
-                        "文字起こしが完了しました。\n" +
-                        "タップ：再生／長押し：日本語訳"
-
-                } finally {
-                    Whisper.releaseModel(model)
                 }
+
+                if (segmentItems.isEmpty() &&
+                    resultText.text.isNotBlank()
+                ) {
+                    val fallback = TextView(this@MainActivity).apply {
+                        text = resultText.text
+                        textSize = 18f
+                        setPadding(12, 14, 12, 14)
+
+                        setOnClickListener {
+                            playSegment(0, Long.MAX_VALUE)
+                        }
+
+                        setOnLongClickListener {
+                            translateSegment(
+                                resultText.text.toString()
+                            )
+                            true
+                        }
+                    }
+                    segmentContainer.addView(fallback)
+                }
+
+                saveButton.isEnabled =
+                    resultText.text.isNotBlank()
+
+                playButton.isEnabled =
+                    audioFile.exists()
+
+                status.text =
+                    "文字起こしが完了しました。\n" +
+                    "タップ：再生／長押し：日本語訳"
 
             } catch (e: Exception) {
 
@@ -399,6 +434,8 @@ class MainActivity : Activity() {
                     "エラー：${e.message ?: e.javaClass.simpleName}"
 
             } finally {
+
+                handler.removeCallbacks(transcriptionProgressUpdater)
 
                 isWorking = false
                 selectButton.isEnabled = true
@@ -590,6 +627,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(transcriptionProgressUpdater)
         releasePlayer()
         translationEngine.close()
         appScope.cancel()
