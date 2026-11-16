@@ -26,7 +26,9 @@ android {
     }
 }
 
+
 dependencies {
     implementation("dev.ffmpegkit-maintained:whisper-android:1.0.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("com.google.mlkit:translate:17.0.3")
 }
