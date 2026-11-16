@@ -8,14 +8,14 @@ import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
 import com.google.android.gms.tasks.Task
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlin.coroutines.suspendCoroutine
 
 class TranslationEngine(context: Context) {
 
     private val cache = TranslationCache(context)
-
     private val translator: Translator
 
     init {
@@ -27,34 +27,41 @@ class TranslationEngine(context: Context) {
         translator = Translation.getClient(options)
     }
 
-    suspend fun translate(source: String): String {
+    suspend fun translate(
+        source: String,
+        onStatus: (String) -> Unit = {}
+    ): String {
+
         val text = source.trim()
 
         require(text.isNotEmpty()) {
             "翻訳する文章がありません。"
         }
 
-        // 保存済みの翻訳を検索
         val saved = cache.getTranslation(text)
 
         if (saved != null) {
             return saved
         }
 
-        // 初回はWi-Fiで翻訳モデルをダウンロード
-        val conditions = DownloadConditions.Builder()
-            .requireWifi()
-            .build()
+        return withTimeout(120000) {
 
-        await(translator.downloadModelIfNeeded(conditions))
+            onStatus("翻訳モデルを確認しています...")
 
-        // ベトナム語から日本語へ翻訳
-        val translated = await(translator.translate(text))
+            val conditions = DownloadConditions.Builder()
+                .requireWifi()
+                .build()
 
-        // 翻訳結果を端末に保存
-        cache.saveTranslation(text, translated)
+            await(translator.downloadModelIfNeeded(conditions))
 
-        return translated
+            onStatus("翻訳モデルの準備完了。日本語に翻訳しています...")
+
+            val translated = await(translator.translate(text))
+
+            cache.saveTranslation(text, translated)
+
+            translated
+        }
     }
 
     fun close() {
@@ -63,13 +70,18 @@ class TranslationEngine(context: Context) {
     }
 
     private suspend fun <T> await(task: Task<T>): T {
-        return suspendCoroutine { continuation ->
+        return suspendCancellableCoroutine { continuation ->
+
             task.addOnSuccessListener { result ->
-                continuation.resume(result)
+                if (continuation.isActive) {
+                    continuation.resume(result)
+                }
             }
 
             task.addOnFailureListener { error ->
-                continuation.resumeWithException(error)
+                if (continuation.isActive) {
+                    continuation.resumeWithException(error)
+                }
             }
         }
     }
