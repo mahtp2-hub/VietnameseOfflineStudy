@@ -2,6 +2,7 @@
 package com.vietnamese.offlinestudy
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -41,6 +42,7 @@ class MainActivity : Activity() {
     private lateinit var saveButton: Button
     private lateinit var playButton: Button
     private lateinit var segmentContainer: LinearLayout
+    private lateinit var translationEngine: TranslationEngine
 
     private var isWorking = false
     private var mediaPlayer: MediaPlayer? = null
@@ -91,6 +93,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        translationEngine = TranslationEngine(this)
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -161,7 +165,7 @@ class MainActivity : Activity() {
         }
 
         val resultTitle = TextView(this).apply {
-            text = "文字起こし結果（文章をタップすると再生）"
+            text = "文字起こし結果（タップ：再生／長押し：日本語訳）"
             textSize = 17f
             setPadding(0, 20, 0, 8)
         }
@@ -330,8 +334,14 @@ class MainActivity : Activity() {
                                 setPadding(12, 14, 12, 14)
                                 setBackgroundColor(0x00000000)
                                 isClickable = true
+
                                 setOnClickListener {
                                     playSegment(start, end)
+                                }
+
+                                setOnLongClickListener {
+                                    translateSegment(text)
+                                    true
                                 }
                             }
 
@@ -354,8 +364,16 @@ class MainActivity : Activity() {
                             text = resultText.text
                             textSize = 18f
                             setPadding(12, 14, 12, 14)
+
                             setOnClickListener {
                                 playSegment(0, Long.MAX_VALUE)
+                            }
+
+                            setOnLongClickListener {
+                                translateSegment(
+                                    resultText.text.toString()
+                                )
+                                true
                             }
                         }
                         segmentContainer.addView(fallback)
@@ -369,7 +387,7 @@ class MainActivity : Activity() {
 
                     status.text =
                         "文字起こしが完了しました。\n" +
-                        "文章をタップすると、その部分を再生します。"
+                        "タップ：再生／長押し：日本語訳"
 
                 } finally {
                     Whisper.releaseModel(model)
@@ -385,6 +403,28 @@ class MainActivity : Activity() {
                 isWorking = false
                 selectButton.isEnabled = true
                 progress.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun translateSegment(source: String) {
+        status.text = "日本語に翻訳しています..."
+
+        appScope.launch {
+            try {
+                val translated = translationEngine.translate(source)
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("日本語訳")
+                    .setMessage(translated)
+                    .setPositiveButton("閉じる", null)
+                    .show()
+
+                status.text = "翻訳しました。"
+
+            } catch (e: Exception) {
+                status.text =
+                    "翻訳エラー：${e.message ?: e.javaClass.simpleName}"
             }
         }
     }
@@ -551,7 +591,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         releasePlayer()
-        super.onDestroy()
+        translationEngine.close()
         appScope.cancel()
+        super.onDestroy()
     }
 }
