@@ -1,4 +1,3 @@
-
 package com.vietnamese.offlinestudy
 
 import android.content.Context
@@ -39,29 +38,45 @@ class TranslationEngine(context: Context) {
         }
 
         val saved = cache.getTranslation(text)
-
         if (saved != null) {
+            onStatus("保存済みの翻訳を表示します...")
             return saved
         }
 
-        return withTimeout(120000) {
+        onStatus("翻訳モデルを確認しています...")
 
-            onStatus("翻訳モデルを確認しています...")
+        val conditions = DownloadConditions.Builder()
+            .requireWifi()
+            .build()
 
-            val conditions = DownloadConditions.Builder()
-                .requireWifi()
-                .build()
-
-            await(translator.downloadModelIfNeeded(conditions))
-
-            onStatus("翻訳モデルの準備完了。日本語に翻訳しています...")
-
-            val translated = await(translator.translate(text))
-
-            cache.saveTranslation(text, translated)
-
-            translated
+        try {
+            withTimeout(120000) {
+                await(translator.downloadModelIfNeeded(conditions))
+            }
+        } catch (e: Exception) {
+            throw Exception(
+                "翻訳モデルの準備に失敗しました：${e.message ?: e.javaClass.simpleName}",
+                e
+            )
         }
+
+        onStatus("翻訳を実行しています...")
+
+        val translated = try {
+            withTimeout(60000) {
+                await(translator.translate(text))
+            }
+        } catch (e: Exception) {
+            throw Exception(
+                "翻訳処理に失敗しました：${e.message ?: e.javaClass.simpleName}",
+                e
+            )
+        }
+
+        onStatus("翻訳結果を保存しています...")
+        cache.saveTranslation(text, translated)
+
+        return translated
     }
 
     fun close() {
@@ -81,6 +96,12 @@ class TranslationEngine(context: Context) {
             task.addOnFailureListener { error ->
                 if (continuation.isActive) {
                     continuation.resumeWithException(error)
+                }
+            }
+
+            task.addOnCanceledListener {
+                if (continuation.isActive) {
+                    continuation.cancel()
                 }
             }
         }
