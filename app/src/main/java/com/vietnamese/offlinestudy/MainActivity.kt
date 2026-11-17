@@ -24,6 +24,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import dev.ffmpegkit.whisper.Whisper
 import dev.ffmpegkit.whisper.WhisperConfig
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -216,6 +218,126 @@ class MainActivity : Activity() {
         )
 
         setContentView(layout)
+
+        restoreTranscriptLocally()
+    }
+
+    private fun createSegmentView(
+        text: String,
+        start: Long,
+        end: Long
+    ): TextView {
+
+        return TextView(this).apply {
+            this.text = text
+            textSize = 18f
+            setPadding(12, 14, 12, 14)
+            setBackgroundColor(0x00000000)
+            isClickable = true
+
+            setOnClickListener {
+                playSegment(start, end)
+            }
+
+            setOnLongClickListener {
+                translateSegment(text)
+                true
+            }
+        }
+    }
+
+    private fun saveTranscriptLocally() {
+        try {
+            val array = JSONArray()
+
+            segmentItems.forEach { segment ->
+                array.put(
+                    JSONObject().apply {
+                        put("start", segment.startMs)
+                        put("end", segment.endMs)
+                        put("text", segment.view.text.toString())
+                    }
+                )
+            }
+
+            getSharedPreferences(
+                "transcript_data",
+                MODE_PRIVATE
+            ).edit()
+                .putString("transcript", resultText.text.toString())
+                .putString("segments", array.toString())
+                .putBoolean("hasTranscript", true)
+                .apply()
+
+        } catch (e: Exception) {
+            status.text = "自動保存エラー：${e.message}"
+        }
+    }
+
+    private fun restoreTranscriptLocally() {
+        try {
+            val prefs = getSharedPreferences(
+                "transcript_data",
+                MODE_PRIVATE
+            )
+
+            if (!prefs.getBoolean("hasTranscript", false)) {
+                return
+            }
+
+            val savedText = prefs.getString("transcript", "") ?: ""
+            if (savedText.isBlank()) return
+
+            resultText.text = savedText
+
+            segmentItems.clear()
+            segmentContainer.removeAllViews()
+
+            val audioFile = File(filesDir, "last_audio.mp3")
+            currentAudioFile =
+                if (audioFile.exists()) audioFile else null
+
+            val array = JSONArray(
+                prefs.getString("segments", "[]") ?: "[]"
+            )
+
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+
+                val start = item.getLong("start")
+                val end = item.getLong("end")
+                val text = item.getString("text")
+
+                if (text.isNotBlank()) {
+                    val view = createSegmentView(text, start, end)
+
+                    segmentItems.add(
+                        TranscriptSegment(start, end, view)
+                    )
+
+                    segmentContainer.addView(view)
+                }
+            }
+
+            if (segmentItems.isEmpty()) {
+                val fallback = createSegmentView(
+                    savedText,
+                    0,
+                    Long.MAX_VALUE
+                )
+                segmentContainer.addView(fallback)
+            }
+
+            saveButton.isEnabled = true
+            playButton.isEnabled =
+                currentAudioFile?.exists() == true
+
+            status.text = "前回の文字起こし結果を復元しました。"
+
+        } catch (e: Exception) {
+            status.text =
+                "保存データの読み込みエラー：${e.message}"
+        }
     }
 
     @Deprecated("Use Activity Result API in a future version")
@@ -363,22 +485,11 @@ class MainActivity : Activity() {
                         val end = s.endMs.toLong()
                             .coerceAtLeast(start + 1)
 
-                        val segmentView = TextView(this@MainActivity).apply {
-                            this.text = text
-                            textSize = 18f
-                            setPadding(12, 14, 12, 14)
-                            setBackgroundColor(0x00000000)
-                            isClickable = true
-
-                            setOnClickListener {
-                                playSegment(start, end)
-                            }
-
-                            setOnLongClickListener {
-                                translateSegment(text)
-                                true
-                            }
-                        }
+                        val segmentView = createSegmentView(
+                            text,
+                            start,
+                            end
+                        )
 
                         segmentItems.add(
                             TranscriptSegment(start, end, segmentView)
@@ -391,22 +502,15 @@ class MainActivity : Activity() {
                 if (segmentItems.isEmpty() &&
                     resultText.text.isNotBlank()
                 ) {
-                    val fallback = TextView(this@MainActivity).apply {
-                        text = resultText.text
-                        textSize = 18f
-                        setPadding(12, 14, 12, 14)
-
-                        setOnClickListener {
-                            playSegment(0, Long.MAX_VALUE)
-                        }
-
-                        setOnLongClickListener {
-                            translateSegment(resultText.text.toString())
-                            true
-                        }
-                    }
+                    val fallback = createSegmentView(
+                        resultText.text.toString(),
+                        0,
+                        Long.MAX_VALUE
+                    )
                     segmentContainer.addView(fallback)
                 }
+
+                saveTranscriptLocally()
 
                 saveButton.isEnabled =
                     resultText.text.isNotBlank()
@@ -414,7 +518,7 @@ class MainActivity : Activity() {
                 playButton.isEnabled = audioFile.exists()
 
                 status.text =
-                    "文字起こしが完了しました。\n" +
+                    "文字起こしが完了しました。自動保存しました。\n" +
                     "タップ：再生／長押し：日本語訳"
 
             } catch (e: Exception) {
