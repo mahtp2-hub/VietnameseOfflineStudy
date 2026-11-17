@@ -11,6 +11,10 @@ import android.net.Uri
 import android.media.MediaPlayer
 import android.view.Gravity
 import android.view.View
+import android.text.SpannableString
+import android.text.TextPaint
+import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -183,7 +187,7 @@ class MainActivity : Activity() {
         }
 
         val resultTitle = TextView(this).apply {
-            text = "文字起こし結果（タップ：再生／長押し：日本語訳）"
+            text = "文字起こし結果（単語タップ：単語訳／長押し：文章訳）"
             textSize = 17f
             setPadding(0, 20, 0, 8)
         }
@@ -228,16 +232,50 @@ class MainActivity : Activity() {
         end: Long
     ): TextView {
 
+        val spannable = SpannableString(text)
+
+        val tokenPattern = Regex("\\S+")
+
+        tokenPattern.findAll(text).forEach { match ->
+            val originalToken = match.value
+
+            val cleanedToken = originalToken.trim {
+                !it.isLetterOrDigit()
+            }
+
+            if (cleanedToken.isNotBlank()) {
+                val leadingLength =
+                    originalToken.indexOf(cleanedToken)
+
+                val tokenStart =
+                    match.range.first + leadingLength
+
+                val tokenEnd =
+                    tokenStart + cleanedToken.length
+
+                spannable.setSpan(
+                    object : ClickableSpan() {
+                        override fun onClick(widget: View) {
+                            translateSegment(cleanedToken)
+                        }
+
+                        override fun updateDrawState(ds: TextPaint) {
+                            ds.isUnderlineText = false
+                        }
+                    },
+                    tokenStart,
+                    tokenEnd,
+                    SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+        }
+
         return TextView(this).apply {
-            this.text = text
+            this.text = spannable
             textSize = 18f
             setPadding(12, 14, 12, 14)
             setBackgroundColor(0x00000000)
-            isClickable = true
-
-            setOnClickListener {
-                playSegment(start, end)
-            }
+            movementMethod = LinkMovementMethod.getInstance()
 
             setOnLongClickListener {
                 translateSegment(text)
@@ -519,7 +557,7 @@ class MainActivity : Activity() {
 
                 status.text =
                     "文字起こしが完了しました。自動保存しました。\n" +
-                    "タップ：再生／長押し：日本語訳"
+                    "単語タップ：単語訳／長押し：文章訳"
 
             } catch (e: Exception) {
                 status.text =
