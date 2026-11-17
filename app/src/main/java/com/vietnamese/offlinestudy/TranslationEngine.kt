@@ -2,6 +2,8 @@
 package com.vietnamese.offlinestudy
 
 import android.content.Context
+import android.net.TrafficStats
+import android.os.StatFs
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
@@ -10,13 +12,14 @@ import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 class TranslationEngine(context: Context) {
 
+    private val appContext = context.applicationContext
     private val cache = TranslationCache(context)
     private val translator: Translator
     private val modelManager = RemoteModelManager.getInstance()
@@ -67,16 +70,7 @@ class TranslationEngine(context: Context) {
 
         onStatus("翻訳を実行しています...")
 
-        val translated = try {
-            withTimeout(60000) {
-                await(translator.translate(text))
-            }
-        } catch (e: Exception) {
-            throw Exception(
-                "翻訳処理に失敗しました：${e.message ?: e.javaClass.simpleName}",
-                e
-            )
-        }
+        val translated = await(translator.translate(text))
 
         onStatus("翻訳結果を保存しています...")
         cache.saveTranslation(text, translated)
@@ -94,49 +88,127 @@ class TranslationEngine(context: Context) {
 
         onStatus("${displayName}モデルの状態を確認しています...")
 
-        val downloaded = try {
-            withTimeout(30000) {
-                await(modelManager.isModelDownloaded(model))
-            }
-        } catch (e: Exception) {
-            throw Exception(
-                "${displayName}モデルの状態確認に失敗：${e.message ?: e.javaClass.simpleName}",
-                e
-            )
-        }
+        val downloaded = await(
+            modelManager.isModelDownloaded(model)
+        )
 
         if (downloaded) {
-            onStatus("${displayName}モデルはダウンロード済みです。")
+            onStatus("${displayName}モデルは準備済みです。")
             return
         }
 
-        onStatus("${displayName}モデルをダウンロードしています...")
+        onStatus("${displayName}モデルのダウンロードを開始します...")
 
-        try {
-            withTimeout(120000) {
-                await(modelManager.download(model, conditions))
+        val startRx = TrafficStats.getTotalRxBytes()
+        val startAvailable =
+            StatFs(appContext.filesDir.absolutePath).availableBytes
+
+        val downloadTask = modelManager.download(model, conditions)
+
+        var previousRx = startRx
+        var previousAvailable = startAvailable
+        var changed = false
+
+        for (second in 1..30) {
+            delay(1000)
+
+            val currentRx = TrafficStats.getTotalRxBytes()
+            val currentAvailable =
+                StatFs(appContext.filesDir.absolutePath).availableBytes
+
+            if (currentRx > startRx ||
+                currentAvailable < startAvailable
+            ) {
+                changed = true
             }
-        } catch (e: Exception) {
+
+            val received =
+                if (startRx >= 0 && currentRx >= startRx) {
+                    (currentRx - startRx) / 1024.0 / 1024.0
+                } else {
+                    -1.0
+                }
+
+            val storageUsed =
+                if (currentAvailable <= startAvailable) {
+                    (startAvailable - currentAvailable) /
+                        1024.0 / 1024.0
+                } else {
+                    0.0
+                }
+
+            val rxText =
+                if (received >= 0) {
+                    String.format("%.2f MB", received)
+                } else {
+                    "取得不可"
+                }
+
+            val storageText =
+                String.format("%.2f MB", storageUsed)
+
+            onStatus(
+                "${displayName}モデルをダウンロード中\n" +
+                "経過時間：${second}秒\n" +
+                "端末全体の受信量：$rxText\n" +
+                "ストレージ使用増加：$storageText"
+            )
+
+            if (downloadTask.isComplete) {
+                break
+            }
+
+            previousRx = currentRx
+            previousAvailable = currentAvailable
+        }
+
+        if (!downloadTask.isComplete) {
+            val currentRx = TrafficStats.getTotalRxBytes()
+            val currentAvailable =
+                StatFs(appContext.filesDir.absolutePath).availableBytes
+
+            val received =
+                if (startRx >= 0 && currentRx >= startRx) {
+                    (currentRx - startRx) / 1024.0 / 1024.0
+                } else {
+                    -1.0
+                }
+
+            val storageUsed =
+                if (currentAvailable <= startAvailable) {
+                    (startAvailable - currentAvailable) /
+                        1024.0 / 1024.0
+                } else {
+                    0.0
+                }
+
+            val rxText =
+                if (received >= 0) {
+                    String.format("%.2f MB", received)
+                } else {
+                    "取得不可"
+                }
+
+            val storageText =
+                String.format("%.2f MB", storageUsed)
+
             throw Exception(
-                "${displayName}モデルのダウンロード失敗：${e.message ?: e.javaClass.simpleName}",
-                e
+                "${displayName}モデルのダウンロードが30秒で完了しませんでした。\n" +
+                "端末全体の受信量：$rxText\n" +
+                "ストレージ使用増加：$storageText\n" +
+                "※どちらも翻訳モデル専用の数値ではありません。"
             )
         }
 
-        val confirmed = try {
-            withTimeout(30000) {
-                await(modelManager.isModelDownloaded(model))
-            }
-        } catch (e: Exception) {
-            throw Exception(
-                "${displayName}モデルの再確認に失敗：${e.message ?: e.javaClass.simpleName}",
-                e
-            )
-        }
+        await(downloadTask)
+
+        val confirmed = await(
+            modelManager.isModelDownloaded(model)
+        )
 
         if (!confirmed) {
             throw Exception(
-                "${displayName}モデルのダウンロード後も、端末に保存されたことを確認できません。"
+                "${displayName}モデルのダウンロード後、保存を確認できません。"
             )
         }
 
