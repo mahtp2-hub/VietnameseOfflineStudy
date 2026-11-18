@@ -2,8 +2,6 @@
 package com.vietnamese.offlinestudy
 
 import android.content.Context
-import android.net.TrafficStats
-import android.os.StatFs
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
@@ -19,10 +17,12 @@ import kotlin.coroutines.resumeWithException
 
 class TranslationEngine(context: Context) {
 
-    private val appContext = context.applicationContext
     private val cache = TranslationCache(context)
     private val translator: Translator
     private val modelManager = RemoteModelManager.getInstance()
+
+    // ダウンロード中の処理を保持する
+    private val downloadTasks = mutableMapOf<String, Task<Void>>()
 
     init {
         val options = TranslatorOptions.Builder()
@@ -97,122 +97,73 @@ class TranslationEngine(context: Context) {
             return
         }
 
-        onStatus("${displayName}モデルのダウンロードを開始します...")
+        // 既存のダウンロードがあれば再利用する
+        val downloadTask = synchronized(downloadTasks) {
+            downloadTasks[language]
+                ?: modelManager.download(model, conditions).also {
+                    downloadTasks[language] = it
+                }
+        }
 
-        val startRx = TrafficStats.getTotalRxBytes()
-        val startAvailable =
-            StatFs(appContext.filesDir.absolutePath).availableBytes
+        onStatus("${displayName}モデルのダウンロードを開始・継続します...")
 
-        val downloadTask = modelManager.download(model, conditions)
+        try {
+            for (second in 1..30) {
+                if (downloadTask.isComplete) {
+                    break
+                }
 
-        var previousRx = startRx
-        var previousAvailable = startAvailable
-        var changed = false
+                onStatus(
+                    "${displayName}モデルをダウンロード中です。\n" +
+                    "経過時間：${second}秒\n" +
+                    "ダウンロード処理は継続しています。"
+                )
 
-        for (second in 1..30) {
-            delay(1000)
-
-            val currentRx = TrafficStats.getTotalRxBytes()
-            val currentAvailable =
-                StatFs(appContext.filesDir.absolutePath).availableBytes
-
-            if (currentRx > startRx ||
-                currentAvailable < startAvailable
-            ) {
-                changed = true
+                delay(1000)
             }
 
-            val received =
-                if (startRx >= 0 && currentRx >= startRx) {
-                    (currentRx - startRx) / 1024.0 / 1024.0
-                } else {
-                    -1.0
+            if (!downloadTask.isComplete) {
+                throw Exception(
+                    "${displayName}モデルのダウンロードはまだ継続中です。\n" +
+                    "処理は停止していません。\n" +
+                    "少し時間をおいてから、もう一度翻訳を試してください。"
+                )
+            }
+
+            // 完了した処理の成功・失敗を確認する
+            await(downloadTask)
+
+            synchronized(downloadTasks) {
+                if (downloadTasks[language] === downloadTask) {
+                    downloadTasks.remove(language)
                 }
+            }
 
-            val storageUsed =
-                if (currentAvailable <= startAvailable) {
-                    (startAvailable - currentAvailable) /
-                        1024.0 / 1024.0
-                } else {
-                    0.0
-                }
-
-            val rxText =
-                if (received >= 0) {
-                    String.format("%.2f MB", received)
-                } else {
-                    "取得不可"
-                }
-
-            val storageText =
-                String.format("%.2f MB", storageUsed)
-
-            onStatus(
-                "${displayName}モデルをダウンロード中\n" +
-                "経過時間：${second}秒\n" +
-                "端末全体の受信量：$rxText\n" +
-                "ストレージ使用増加：$storageText"
+            val confirmed = await(
+                modelManager.isModelDownloaded(model)
             )
 
+            if (!confirmed) {
+                throw Exception(
+                    "${displayName}モデルのダウンロード後、保存を確認できません。"
+                )
+            }
+
+            onStatus("${displayName}モデルの準備が完了しました。")
+
+        } catch (error: Exception) {
+
+            // まだ実行中なら保持し、失敗・完了済みなら次回に備えて解除
             if (downloadTask.isComplete) {
-                break
+                synchronized(downloadTasks) {
+                    if (downloadTasks[language] === downloadTask) {
+                        downloadTasks.remove(language)
+                    }
+                }
             }
 
-            previousRx = currentRx
-            previousAvailable = currentAvailable
+            throw error
         }
-
-        if (!downloadTask.isComplete) {
-            val currentRx = TrafficStats.getTotalRxBytes()
-            val currentAvailable =
-                StatFs(appContext.filesDir.absolutePath).availableBytes
-
-            val received =
-                if (startRx >= 0 && currentRx >= startRx) {
-                    (currentRx - startRx) / 1024.0 / 1024.0
-                } else {
-                    -1.0
-                }
-
-            val storageUsed =
-                if (currentAvailable <= startAvailable) {
-                    (startAvailable - currentAvailable) /
-                        1024.0 / 1024.0
-                } else {
-                    0.0
-                }
-
-            val rxText =
-                if (received >= 0) {
-                    String.format("%.2f MB", received)
-                } else {
-                    "取得不可"
-                }
-
-            val storageText =
-                String.format("%.2f MB", storageUsed)
-
-            throw Exception(
-                "${displayName}モデルのダウンロードが30秒で完了しませんでした。\n" +
-                "端末全体の受信量：$rxText\n" +
-                "ストレージ使用増加：$storageText\n" +
-                "※どちらも翻訳モデル専用の数値ではありません。"
-            )
-        }
-
-        await(downloadTask)
-
-        val confirmed = await(
-            modelManager.isModelDownloaded(model)
-        )
-
-        if (!confirmed) {
-            throw Exception(
-                "${displayName}モデルのダウンロード後、保存を確認できません。"
-            )
-        }
-
-        onStatus("${displayName}モデルの準備が完了しました。")
     }
 
     fun close() {
