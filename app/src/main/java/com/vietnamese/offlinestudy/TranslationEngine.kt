@@ -3,6 +3,7 @@ package com.vietnamese.offlinestudy
 
 import android.content.Context
 import com.google.android.gms.tasks.Task
+import com.google.mlkit.common.MlKitException
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.nl.translate.TranslateLanguage
@@ -21,8 +22,9 @@ class TranslationEngine(context: Context) {
     private val translator: Translator
     private val modelManager = RemoteModelManager.getInstance()
 
-    // ダウンロード中の処理を保持する
-    private val downloadTasks = mutableMapOf<String, Task<Void>>()
+    // ダウンロード処理を保持する
+    private var downloadTask: Task<Void>? = null
+    private val downloadLock = Any()
 
     init {
         val options = TranslatorOptions.Builder()
@@ -45,6 +47,7 @@ class TranslationEngine(context: Context) {
         }
 
         val saved = cache.getTranslation(text)
+
         if (saved != null) {
             onStatus("保存済みの翻訳を表示します...")
             return saved
@@ -54,19 +57,7 @@ class TranslationEngine(context: Context) {
             .requireWifi()
             .build()
 
-        ensureModel(
-            TranslateLanguage.VIETNAMESE,
-            "ベトナム語",
-            conditions,
-            onStatus
-        )
-
-        ensureModel(
-            TranslateLanguage.JAPANESE,
-            "日本語",
-            conditions,
-            onStatus
-        )
+        ensureModels(conditions, onStatus)
 
         onStatus("翻訳を実行しています...")
 
@@ -78,88 +69,115 @@ class TranslationEngine(context: Context) {
         return translated
     }
 
-    private suspend fun ensureModel(
-        language: String,
-        displayName: String,
+    private suspend fun ensureModels(
         conditions: DownloadConditions,
         onStatus: (String) -> Unit
     ) {
-        val model = TranslateRemoteModel.Builder(language).build()
 
-        onStatus("${displayName}モデルの状態を確認しています...")
+        val viModel =
+            TranslateRemoteModel.Builder(
+                TranslateLanguage.VIETNAMESE
+            ).build()
 
-        val downloaded = await(
-            modelManager.isModelDownloaded(model)
+        val jaModel =
+            TranslateRemoteModel.Builder(
+                TranslateLanguage.JAPANESE
+            ).build()
+
+        onStatus("翻訳モデルの保存状態を確認しています...")
+
+        val viReady = await(
+            modelManager.isModelDownloaded(viModel)
         )
 
-        if (downloaded) {
-            onStatus("${displayName}モデルは準備済みです。")
+        val jaReady = await(
+            modelManager.isModelDownloaded(jaModel)
+        )
+
+        if (viReady && jaReady) {
+            onStatus("翻訳モデルは準備済みです。")
             return
         }
 
-        // 既存のダウンロードがあれば再利用する
-        val downloadTask = synchronized(downloadTasks) {
-            downloadTasks[language]
-                ?: modelManager.download(model, conditions).also {
-                    downloadTasks[language] = it
+        val task = synchronized(downloadLock) {
+            downloadTask ?: translator
+                .downloadModelIfNeeded(conditions)
+                .also {
+                    downloadTask = it
                 }
         }
 
-        onStatus("${displayName}モデルのダウンロードを開始・継続します...")
-
         try {
+
+            onStatus("Google ML Kitの翻訳モデルを準備しています...")
+
             for (second in 1..30) {
-                if (downloadTask.isComplete) {
+
+                if (task.isComplete) {
                     break
                 }
 
                 onStatus(
-                    "${displayName}モデルをダウンロード中です。\n" +
+                    "翻訳モデルをダウンロード中です。\n" +
                     "経過時間：${second}秒\n" +
-                    "ダウンロード処理は継続しています。"
+                    "Google ML Kitの応答を待っています。"
                 )
 
                 delay(1000)
             }
 
-            if (!downloadTask.isComplete) {
+            if (!task.isComplete) {
                 throw Exception(
-                    "${displayName}モデルのダウンロードはまだ継続中です。\n" +
-                    "処理は停止していません。\n" +
-                    "少し時間をおいてから、もう一度翻訳を試してください。"
+                    "30秒経過しましたが、Google ML Kitから完了通知がありません。\n" +
+                    "ダウンロード処理は保持しています。"
                 )
             }
 
-            // 完了した処理の成功・失敗を確認する
-            await(downloadTask)
+            // 成功・失敗を実際のTaskから取得
+            await(task)
 
-            synchronized(downloadTasks) {
-                if (downloadTasks[language] === downloadTask) {
-                    downloadTasks.remove(language)
-                }
-            }
-
-            val confirmed = await(
-                modelManager.isModelDownloaded(model)
+            val viConfirmed = await(
+                modelManager.isModelDownloaded(viModel)
             )
 
-            if (!confirmed) {
+            val jaConfirmed = await(
+                modelManager.isModelDownloaded(jaModel)
+            )
+
+            if (!viConfirmed || !jaConfirmed) {
                 throw Exception(
-                    "${displayName}モデルのダウンロード後、保存を確認できません。"
+                    "ダウンロード処理は成功しましたが、モデル保存を確認できません。\n" +
+                    "ベトナム語モデル：${if (viConfirmed) "保存済み" else "未確認"}\n" +
+                    "日本語モデル：${if (jaConfirmed) "保存済み" else "未確認"}"
                 )
             }
 
-            onStatus("${displayName}モデルの準備が完了しました。")
+            onStatus("ベトナム語・日本語モデルの準備が完了しました。")
+
+            synchronized(downloadLock) {
+                if (downloadTask === task) {
+                    downloadTask = null
+                }
+            }
 
         } catch (error: Exception) {
 
-            // まだ実行中なら保持し、失敗・完了済みなら次回に備えて解除
-            if (downloadTask.isComplete) {
-                synchronized(downloadTasks) {
-                    if (downloadTasks[language] === downloadTask) {
-                        downloadTasks.remove(language)
+            if (task.isComplete) {
+                synchronized(downloadLock) {
+                    if (downloadTask === task) {
+                        downloadTask = null
                     }
                 }
+            }
+
+            if (error is MlKitException) {
+                throw Exception(
+                    "Google ML Kitエラー\n" +
+                    "エラーコード：${error.errorCode}\n" +
+                    "エラー種別：${error.javaClass.simpleName}\n" +
+                    "詳細：${error.message ?: "詳細なし"}",
+                    error
+                )
             }
 
             throw error
