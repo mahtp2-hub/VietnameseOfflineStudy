@@ -65,9 +65,9 @@ class MainActivity : Activity() {
     private val segmentItems =
         mutableListOf<TranscriptSegment>()
 
-    private val modelName = "ggml-base.bin"
+    private val modelName = "ggml-small.bin"
     private val modelUrl =
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 
     private val transcriptionProgressUpdater =
         object : Runnable {
