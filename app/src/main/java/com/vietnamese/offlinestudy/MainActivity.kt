@@ -264,14 +264,20 @@ class MainActivity : Activity() {
         end: Long
     ): TextView {
 
+        val transcriptText = text
+        var downX = 0f
+        var downY = 0f
+        var downTime = 0L
+
         return TextView(this).apply {
-            this.text = text
+            this.text = transcriptText
             textSize = 18f
             setPadding(12, 14, 12, 14)
             setBackgroundColor(0x00000000)
 
             setTextIsSelectable(true)
 
+            // 複数単語の範囲選択後に翻訳するメニュー
             customSelectionActionModeCallback =
                 object : android.view.ActionMode.Callback {
 
@@ -279,12 +285,7 @@ class MainActivity : Activity() {
                         mode: android.view.ActionMode,
                         menu: android.view.Menu
                     ): Boolean {
-                        menu.add(
-                            0,
-                            1001,
-                            0,
-                            "選択範囲を翻訳"
-                        )
+                        menu.add(0, 1001, 0, "選択範囲を翻訳")
                         return true
                     }
 
@@ -299,7 +300,6 @@ class MainActivity : Activity() {
                         mode: android.view.ActionMode,
                         item: android.view.MenuItem
                     ): Boolean {
-
                         if (item.itemId == 1001) {
                             val first = selectionStart
                             val last = selectionEnd
@@ -309,7 +309,7 @@ class MainActivity : Activity() {
                                 val to = maxOf(first, last)
 
                                 val selectedText =
-                                    this@apply.text
+                                    transcriptText
                                         .subSequence(from, to)
                                         .toString()
                                         .trim()
@@ -331,6 +331,49 @@ class MainActivity : Activity() {
                     ) {
                     }
                 }
+
+            // 短いタップなら単語翻訳。長押しは範囲選択に任せる
+            setOnTouchListener { _, event ->
+                when (event.action) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        downX = event.x
+                        downY = event.y
+                        downTime = event.eventTime
+                    }
+
+                    android.view.MotionEvent.ACTION_UP -> {
+                        val duration = event.eventTime - downTime
+                        val distance = kotlin.math.hypot(
+                            (event.x - downX).toDouble(),
+                            (event.y - downY).toDouble()
+                        )
+
+                        if (duration < 350 &&
+                            distance < android.view.ViewConfiguration
+                                .get(context).scaledTouchSlop
+                        ) {
+                            val offset = getOffsetForPosition(
+                                event.x,
+                                event.y
+                            )
+
+                            val word = Regex(
+                                "[\\p{L}\\p{M}]+(?:['’][\\p{L}\\p{M}]+)*"
+                            ).findAll(transcriptText)
+                                .firstOrNull {
+                                    offset >= it.range.first &&
+                                    offset <= it.range.last
+                                }?.value
+
+                            if (!word.isNullOrBlank()) {
+                                translateSegment(word)
+                            }
+                        }
+                    }
+                }
+
+                false
+            }
         }
     }
 
