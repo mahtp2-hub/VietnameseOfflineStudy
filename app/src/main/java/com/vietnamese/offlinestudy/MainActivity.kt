@@ -232,55 +232,73 @@ class MainActivity : Activity() {
         end: Long
     ): TextView {
 
-        val spannable = SpannableString(text)
-
-        val tokenPattern = Regex("\\S+")
-
-        tokenPattern.findAll(text).forEach { match ->
-            val originalToken = match.value
-
-            val cleanedToken = originalToken.trim {
-                !it.isLetterOrDigit()
-            }
-
-            if (cleanedToken.isNotBlank()) {
-                val leadingLength =
-                    originalToken.indexOf(cleanedToken)
-
-                val tokenStart =
-                    match.range.first + leadingLength
-
-                val tokenEnd =
-                    tokenStart + cleanedToken.length
-
-                spannable.setSpan(
-                    object : ClickableSpan() {
-                        override fun onClick(widget: View) {
-                            translateSegment(cleanedToken)
-                        }
-
-                        override fun updateDrawState(ds: TextPaint) {
-                            ds.isUnderlineText = false
-                        }
-                    },
-                    tokenStart,
-                    tokenEnd,
-                    SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE
-                )
-            }
-        }
-
         return TextView(this).apply {
-            this.text = spannable
+            this.text = text
             textSize = 18f
             setPadding(12, 14, 12, 14)
             setBackgroundColor(0x00000000)
-            movementMethod = LinkMovementMethod.getInstance()
 
-            setOnLongClickListener {
-                translateSegment(text)
-                true
-            }
+            setTextIsSelectable(true)
+
+            customSelectionActionModeCallback =
+                object : android.view.ActionMode.Callback {
+
+                    override fun onCreateActionMode(
+                        mode: android.view.ActionMode,
+                        menu: android.view.Menu
+                    ): Boolean {
+                        menu.add(
+                            0,
+                            1001,
+                            0,
+                            "選択範囲を翻訳"
+                        )
+                        return true
+                    }
+
+                    override fun onPrepareActionMode(
+                        mode: android.view.ActionMode,
+                        menu: android.view.Menu
+                    ): Boolean {
+                        return false
+                    }
+
+                    override fun onActionItemClicked(
+                        mode: android.view.ActionMode,
+                        item: android.view.MenuItem
+                    ): Boolean {
+
+                        if (item.itemId == 1001) {
+                            val first = selectionStart
+                            val last = selectionEnd
+
+                            if (first >= 0 && last >= 0 && first != last) {
+                                val from = minOf(first, last)
+                                val to = maxOf(first, last)
+
+                                val selectedText =
+                                    this@apply.text
+                                        .subSequence(from, to)
+                                        .toString()
+                                        .trim()
+
+                                if (selectedText.isNotBlank()) {
+                                    translateSegment(selectedText)
+                                }
+                            }
+
+                            mode.finish()
+                            return true
+                        }
+
+                        return false
+                    }
+
+                    override fun onDestroyActionMode(
+                        mode: android.view.ActionMode
+                    ) {
+                    }
+                }
         }
     }
 
