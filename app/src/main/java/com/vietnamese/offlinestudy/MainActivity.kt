@@ -69,19 +69,51 @@ class MainActivity : Activity() {
     private val modelUrl =
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 
+    private var transcriptionStartedAt = 0L
+    private var ninetyPercentReachedAt = 0L
+
     private val transcriptionProgressUpdater =
         object : Runnable {
             override fun run() {
                 if (!isWorking) return
 
+                val now = android.os.SystemClock.elapsedRealtime()
+
                 if (progress.progress < 90) {
                     progress.progress =
                         (progress.progress + 1).coerceAtMost(90)
-                }
 
-                status.text =
-                    "ベトナム語を文字起こししています...\n" +
-                    "進捗目安：${progress.progress}%（実際の認識率ではありません）"
+                    if (progress.progress == 90) {
+                        ninetyPercentReachedAt = now
+                    }
+
+                    status.text =
+                        "ベトナム語を文字起こししています...\n" +
+                        "進捗目安：${progress.progress}%"
+                } else {
+                    val elapsedSeconds =
+                        ((now - ninetyPercentReachedAt) / 1000).coerceAtLeast(0)
+
+                    val elapsedMinutes = elapsedSeconds / 60
+                    val elapsedRemainder = elapsedSeconds % 60
+
+                    val estimatedTotalSeconds = 360L
+                    val remainingSeconds =
+                        (estimatedTotalSeconds - elapsedSeconds)
+                            .coerceAtLeast(0)
+
+                    val remainingText =
+                        if (remainingSeconds > 0) {
+                            "予想残り時間：約${remainingSeconds / 60}分${remainingSeconds % 60}秒"
+                        } else {
+                            "予想時間を超過しています。処理は継続中です。"
+                        }
+
+                    status.text =
+                        "最終認識処理中（進捗率は取得できません）\n" +
+                        "90%到達後の経過時間：${elapsedMinutes}分${elapsedRemainder}秒\n" +
+                        remainingText
+                }
 
                 handler.postDelayed(this, 2000)
             }
