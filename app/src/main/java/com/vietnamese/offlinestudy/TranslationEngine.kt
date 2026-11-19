@@ -2,8 +2,9 @@
 package com.vietnamese.offlinestudy
 
 import android.content.Context
+import android.net.TrafficStats
+import android.os.StatFs
 import com.google.android.gms.tasks.Task
-import com.google.mlkit.common.MlKitException
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.nl.translate.TranslateLanguage
@@ -18,13 +19,10 @@ import kotlin.coroutines.resumeWithException
 
 class TranslationEngine(context: Context) {
 
+    private val appContext = context.applicationContext
     private val cache = TranslationCache(context)
     private val translator: Translator
     private val modelManager = RemoteModelManager.getInstance()
-
-    // ダウンロード処理を保持する
-    private var downloadTask: Task<Void>? = null
-    private val downloadLock = Any()
 
     init {
         val options = TranslatorOptions.Builder()
@@ -47,7 +45,6 @@ class TranslationEngine(context: Context) {
         }
 
         val saved = cache.getTranslation(text)
-
         if (saved != null) {
             onStatus("保存済みの翻訳を表示します...")
             return saved
@@ -57,7 +54,19 @@ class TranslationEngine(context: Context) {
             .requireWifi()
             .build()
 
-        ensureModels(conditions, onStatus)
+        ensureModel(
+            TranslateLanguage.VIETNAMESE,
+            "ベトナム語",
+            conditions,
+            onStatus
+        )
+
+        ensureModel(
+            TranslateLanguage.JAPANESE,
+            "日本語",
+            conditions,
+            onStatus
+        )
 
         onStatus("翻訳を実行しています...")
 
@@ -69,119 +78,141 @@ class TranslationEngine(context: Context) {
         return translated
     }
 
-    private suspend fun ensureModels(
+    private suspend fun ensureModel(
+        language: String,
+        displayName: String,
         conditions: DownloadConditions,
         onStatus: (String) -> Unit
     ) {
+        val model = TranslateRemoteModel.Builder(language).build()
 
-        val viModel =
-            TranslateRemoteModel.Builder(
-                TranslateLanguage.VIETNAMESE
-            ).build()
+        onStatus("${displayName}モデルの状態を確認しています...")
 
-        val jaModel =
-            TranslateRemoteModel.Builder(
-                TranslateLanguage.JAPANESE
-            ).build()
-
-        onStatus("翻訳モデルの保存状態を確認しています...")
-
-        val viReady = await(
-            modelManager.isModelDownloaded(viModel)
+        val downloaded = await(
+            modelManager.isModelDownloaded(model)
         )
 
-        val jaReady = await(
-            modelManager.isModelDownloaded(jaModel)
-        )
-
-        if (viReady && jaReady) {
-            onStatus("翻訳モデルは準備済みです。")
+        if (downloaded) {
+            onStatus("${displayName}モデルは準備済みです。")
             return
         }
 
-        val task = synchronized(downloadLock) {
-            downloadTask ?: translator
-                .downloadModelIfNeeded(conditions)
-                .also {
-                    downloadTask = it
-                }
-        }
+        onStatus("${displayName}モデルのダウンロードを開始します...")
 
-        try {
+        val startRx = TrafficStats.getTotalRxBytes()
+        val startAvailable =
+            StatFs(appContext.filesDir.absolutePath).availableBytes
 
-            onStatus("Google ML Kitの翻訳モデルを準備しています...")
+        val downloadTask = modelManager.download(model, conditions)
 
-            for (second in 1..30) {
+        var previousRx = startRx
+        var previousAvailable = startAvailable
+        var changed = false
 
-                if (task.isComplete) {
-                    break
-                }
+        for (second in 1..30) {
+            delay(1000)
 
-                onStatus(
-                    "翻訳モデルをダウンロード中です。\n" +
-                    "経過時間：${second}秒\n" +
-                    "Google ML Kitの応答を待っています。"
-                )
+            val currentRx = TrafficStats.getTotalRxBytes()
+            val currentAvailable =
+                StatFs(appContext.filesDir.absolutePath).availableBytes
 
-                delay(1000)
+            if (currentRx > startRx ||
+                currentAvailable < startAvailable
+            ) {
+                changed = true
             }
 
-            if (!task.isComplete) {
-                throw Exception(
-                    "30秒経過しましたが、Google ML Kitから完了通知がありません。\n" +
-                    "ダウンロード処理は保持しています。"
-                )
-            }
+            val received =
+                if (startRx >= 0 && currentRx >= startRx) {
+                    (currentRx - startRx) / 1024.0 / 1024.0
+                } else {
+                    -1.0
+                }
 
-            // 成功・失敗を実際のTaskから取得
-            await(task)
+            val storageUsed =
+                if (currentAvailable <= startAvailable) {
+                    (startAvailable - currentAvailable) /
+                        1024.0 / 1024.0
+                } else {
+                    0.0
+                }
 
-            val viConfirmed = await(
-                modelManager.isModelDownloaded(viModel)
+            val rxText =
+                if (received >= 0) {
+                    String.format("%.2f MB", received)
+                } else {
+                    "取得不可"
+                }
+
+            val storageText =
+                String.format("%.2f MB", storageUsed)
+
+            onStatus(
+                "${displayName}モデルをダウンロード中\n" +
+                "経過時間：${second}秒\n" +
+                "端末全体の受信量：$rxText\n" +
+                "ストレージ使用増加：$storageText"
             )
 
-            val jaConfirmed = await(
-                modelManager.isModelDownloaded(jaModel)
-            )
-
-            if (!viConfirmed || !jaConfirmed) {
-                throw Exception(
-                    "ダウンロード処理は成功しましたが、モデル保存を確認できません。\n" +
-                    "ベトナム語モデル：${if (viConfirmed) "保存済み" else "未確認"}\n" +
-                    "日本語モデル：${if (jaConfirmed) "保存済み" else "未確認"}"
-                )
+            if (downloadTask.isComplete) {
+                break
             }
 
-            onStatus("ベトナム語・日本語モデルの準備が完了しました。")
-
-            synchronized(downloadLock) {
-                if (downloadTask === task) {
-                    downloadTask = null
-                }
-            }
-
-        } catch (error: Exception) {
-
-            if (task.isComplete) {
-                synchronized(downloadLock) {
-                    if (downloadTask === task) {
-                        downloadTask = null
-                    }
-                }
-            }
-
-            if (error is MlKitException) {
-                throw Exception(
-                    "Google ML Kitエラー\n" +
-                    "エラーコード：${error.errorCode}\n" +
-                    "エラー種別：${error.javaClass.simpleName}\n" +
-                    "詳細：${error.message ?: "詳細なし"}",
-                    error
-                )
-            }
-
-            throw error
+            previousRx = currentRx
+            previousAvailable = currentAvailable
         }
+
+        if (!downloadTask.isComplete) {
+            val currentRx = TrafficStats.getTotalRxBytes()
+            val currentAvailable =
+                StatFs(appContext.filesDir.absolutePath).availableBytes
+
+            val received =
+                if (startRx >= 0 && currentRx >= startRx) {
+                    (currentRx - startRx) / 1024.0 / 1024.0
+                } else {
+                    -1.0
+                }
+
+            val storageUsed =
+                if (currentAvailable <= startAvailable) {
+                    (startAvailable - currentAvailable) /
+                        1024.0 / 1024.0
+                } else {
+                    0.0
+                }
+
+            val rxText =
+                if (received >= 0) {
+                    String.format("%.2f MB", received)
+                } else {
+                    "取得不可"
+                }
+
+            val storageText =
+                String.format("%.2f MB", storageUsed)
+
+            throw Exception(
+                "${displayName}モデルのダウンロードが30秒で完了しませんでした。\n" +
+                "端末全体の受信量：$rxText\n" +
+                "ストレージ使用増加：$storageText\n" +
+                "※どちらも翻訳モデル専用の数値ではありません。"
+            )
+        }
+
+        await(downloadTask)
+
+        val confirmed = await(
+            modelManager.isModelDownloaded(model)
+        )
+
+        if (!confirmed) {
+            throw Exception(
+                "${displayName}モデルのダウンロード後、保存を確認できません。"
+            )
+        }
+
+        onStatus("${displayName}モデルの準備が完了しました。")
     }
 
     fun close() {
