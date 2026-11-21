@@ -258,6 +258,10 @@ class MainActivity : Activity() {
         restoreTranscriptLocally()
     }
 
+
+
+
+
     private fun createSegmentView(
         text: String,
         start: Long,
@@ -274,10 +278,8 @@ class MainActivity : Activity() {
             textSize = 18f
             setPadding(12, 14, 12, 14)
             setBackgroundColor(0x00000000)
-
             setTextIsSelectable(true)
 
-            // 複数単語の範囲選択後に翻訳するメニュー
             customSelectionActionModeCallback =
                 object : android.view.ActionMode.Callback {
 
@@ -292,38 +294,31 @@ class MainActivity : Activity() {
                     override fun onPrepareActionMode(
                         mode: android.view.ActionMode,
                         menu: android.view.Menu
-                    ): Boolean {
-                        return false
-                    }
+                    ): Boolean = false
 
                     override fun onActionItemClicked(
                         mode: android.view.ActionMode,
                         item: android.view.MenuItem
                     ): Boolean {
-                        if (item.itemId == 1001) {
-                            val first = selectionStart
-                            val last = selectionEnd
+                        if (item.itemId != 1001) return false
 
-                            if (first >= 0 && last >= 0 && first != last) {
-                                val from = minOf(first, last)
-                                val to = maxOf(first, last)
+                        val first = selectionStart
+                        val last = selectionEnd
 
-                                val selectedText =
-                                    transcriptText
-                                        .subSequence(from, to)
-                                        .toString()
-                                        .trim()
+                        if (first >= 0 && last >= 0 && first != last) {
+                            val from = minOf(first, last)
+                            val to = maxOf(first, last)
 
-                                if (selectedText.isNotBlank()) {
-                                    translateSegment(selectedText)
-                                }
+                            val selectedText =
+                                transcriptText.substring(from, to).trim()
+
+                            if (selectedText.isNotBlank()) {
+                                translateSegment(selectedText)
                             }
-
-                            mode.finish()
-                            return true
                         }
 
-                        return false
+                        mode.finish()
+                        return true
                     }
 
                     override fun onDestroyActionMode(
@@ -332,13 +327,13 @@ class MainActivity : Activity() {
                     }
                 }
 
-            // 短いタップなら単語翻訳。長押しは範囲選択に任せる
             setOnTouchListener { _, event ->
                 when (event.action) {
                     android.view.MotionEvent.ACTION_DOWN -> {
                         downX = event.x
                         downY = event.y
                         downTime = event.eventTime
+                        false
                     }
 
                     android.view.MotionEvent.ACTION_UP -> {
@@ -368,14 +363,31 @@ class MainActivity : Activity() {
                             if (!word.isNullOrBlank()) {
                                 translateSegment(word)
                             }
+                            true
+                        } else {
+                            false
                         }
                     }
-                }
 
-                false
+                    else -> false
+                }
             }
         }
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     private fun saveTranscriptLocally() {
         try {
